@@ -1,37 +1,65 @@
 import rasterio
-import geopandas as gpd
 from rasterio.mask import mask
+import geopandas as gpd
+import os
+import glob
+import numpy as np
+from matplotlib import pyplot as plt
+from rasterio.plot import show
 
-def crop_tif_with_geojson(tif_path, geojson_path, output_path):
-    try:
-        # Open the GeoTIFF file
-        with rasterio.open(tif_path) as src:
-            # Read the GeoJSON file
-            with open(geojson_path, "r") as geojson_file:
-                geojson_data = gpd.read_file(geojson_file)
-                geojson_data = geojson_data.set_crs("EPSG:4326").to_crs("EPSG:28992")
+def __make_the_crop(
+    path_to_geojson, raster_path, raster_path_cropped, plot
+):
+    """
+    This crops the satellite image with a chosen shape.
 
-                # Extract the geometry from the GeoJSON
-                geom = geojson_data.geometry.values[0]
+    TODO: Make this accept a object of geopandas or shapely and crs independent.
+    @param coordinates: Coordinates of the polygon to make the crop on.
+    @param raster_path: path to the raster .tiff file.
+    @param raster_path_cropped: path were the cropped raster will be stored.
+    @param plot: Plot the results true or false
+    """
 
-                # Perform the crop operation
-                out_image, out_transform = mask(src, [geom], crop=True)
-                out_meta = src.meta.copy()
+    agdf = gpd.read_file(path_to_geojson)
+    area_to_crop = agdf["geometry"]
 
-                # Update the metadata for the cropped image
-                out_meta.update(
-                    {
-                        "driver": "GTiff",
-                        "height": out_image.shape[1],
-                        "width": out_image.shape[2],
-                        "transform": out_transform,
-                    }
-                )
+    with rasterio.open(raster_path) as src:
+        print("raster path opened")
 
-                # Write the cropped image to a new GeoTIFF file
-                with rasterio.open(output_path, "w", **out_meta) as dest:
-                    dest.write(out_image)
+        out_image, out_transform = rasterio.mask.mask(
+            src, area_to_crop, crop=True, filled=True
+        )
+        out_profile = src.profile
 
-                print(f"Cropped GeoTIFF saved to {output_path}")
-    except Exception as e:
-        print(f"Error cropping GeoTIFF: {e}")
+        # Set the nodata value
+        nodata_value = src.nodata if src.nodata is not None else 0
+        out_profile.update(
+            {
+                "driver": "GTiff",
+                "interleave": "band",
+                "tiled": True,
+                "height": out_image.shape[1],
+                "width": out_image.shape[2],
+                "transform": out_transform,
+                "nodata": nodata_value,
+            }
+        )
+
+        # Create an alpha band for transparency
+        alpha = np.where(out_image[0] == nodata_value, 0, 255).astype("uint8")
+        out_image = np.concatenate([out_image, alpha[np.newaxis, ...]], axis=0)
+        out_profile.update(count=out_image.shape[0])
+
+        with rasterio.open(raster_path_cropped, "w", **out_profile) as dest:
+            dest.write(out_image)
+
+    if plot:
+        print(
+            "Plotting data for:"
+            + raster_path_cropped
+            + "-----------------------------------------------------"
+        )
+        with rasterio.open(raster_path_cropped) as src:
+            data = src.read(masked=True)
+            plt.figure(figsize=(10, 10))
+            rasterio.plot.show(data, transform=src.transform)
